@@ -1,111 +1,59 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import mean_absolute_error
-import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
+import plotly.graph_objects as go
 from amadeus import Client, ResponseError
-from google.cloud import storage
-from io import StringIO
-from google.oauth2 import service_account
-import logging
 import random
-import json
-import sys
-import os
-import boto3
+import logging
+import time
+from tqdm import tqdm
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import LabelEncoder
+import warnings
+warnings.filterwarnings('ignore')
+
+# Configure logging
+logging.basicConfig(
+    filename='flight_prediction.log',
+    level=logging.ERROR,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+# Initialize Amadeus client
 try:
-    from openai import OpenAI
-except ModuleNotFoundError:
-    import subprocess
-    subprocess.check_call(["pip", "install", "openai"])
-    from openai import OpenAI
-
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Set page config
-st.set_page_config(page_title="Flight Price Predictor", layout="wide")
-
-# Initialize clients
-@st.cache_resource
-def initialize_clients():
     amadeus = Client(
-        client_id=st.secrets["AMADEUS_CLIENT_ID"],
-        client_secret=st.secrets["AMADEUS_CLIENT_SECRET"]
+        client_id='YOUR_API_KEY',
+        client_secret='YOUR_API_SECRET'
     )
-    credentials = service_account.Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"]
-    )
-    storage_client = storage.Client(credentials=credentials)
-    bucket = storage_client.bucket(st.secrets["gcs_bucket_name"])
-    return amadeus, bucket
-
-amadeus, bucket = initialize_clients()
-
-def get_data_filename(origin, destination):
-    return f"flight_prices_{origin}_{destination}.csv"
-
-def load_data_from_gcs(origin, destination):
-    filename = get_data_filename(origin, destination)
-    blob = bucket.blob(filename)
-    df = pd.DataFrame()
-
-    if blob.exists():
-        try:
-            content = blob.download_as_text()
-            df = pd.read_csv(StringIO(content))
-            df['departure'] = pd.to_datetime(df['departure'])
-            logging.info(f"Loaded {len(df)} records for {origin} to {destination}")
-        except Exception as e:
-            logging.warning(f"Error loading data for {origin} to {destination}: {str(e)}")
-
-    return df
-
-def save_data_to_gcs(df, origin, destination):
-    filename = get_data_filename(origin, destination)
-    csv_buffer = StringIO()
-    df.to_csv(csv_buffer, index=False)
-    blob = bucket.blob(filename)
-    blob.upload_from_string(csv_buffer.getvalue(), content_type="text/csv")
-    logging.info(f"Saved {len(df)} records for {origin} to {destination}")
-
-def should_call_api(origin, destination):
-    api_calls_file = "api_calls.json"
-    blob = bucket.blob(api_calls_file)
-    now = datetime.now()
-    
-    try:
-        content = blob.download_as_text()
-        api_calls = json.loads(content)
-    except Exception:
-        api_calls = {}
-
-    route_key = f"{origin}-{destination}"
-    if route_key in api_calls:
-        last_call_time = datetime.fromisoformat(api_calls[route_key])
-        if now - last_call_time < timedelta(hours=12):
-            return False
-
-    # Update the API call time for this route
-    api_calls[route_key] = now.isoformat()
-    blob.upload_from_string(json.dumps(api_calls), content_type="application/json")
-
-    return True
+except Exception as e:
+    logging.error(f"Failed to initialize Amadeus client: {str(e)}")
+    amadeus = None
 
 def fetch_and_process_data(origin, destination, start_date, end_date):
+    """
+    Fetch and process flight data with error handling and progress indication
+    """
     all_data = []
     current_date = start_date
     end_date = start_date + relativedelta(months=12)
+    
+    # Setup progress tracking
+    total_iterations = ((end_date - current_date).days // 30) * 3
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    processed = 0
 
     while current_date < end_date:
         month_end = current_date + relativedelta(months=1, days=-1)
-        sample_dates = [current_date + timedelta(days=random.randint(0, (month_end - current_date).days)) for _ in range(3)]
+        sample_dates = [current_date + timedelta(days=random.randint(0, (month_end - current_date).days)) 
+                       for _ in range(3)]
 
         for sample_date in sample_dates:
+            status_text.text(f"Analyzing flights for {sample_date.strftime('%Y-%m-%d')}...")
+            
             try:
                 response = amadeus.shopping.flight_offers_search.get(
                     originLocationCode=origin,
@@ -113,167 +61,196 @@ def fetch_and_process_data(origin, destination, start_date, end_date):
                     departureDate=sample_date.strftime('%Y-%m-%d'),
                     adults=1
                 )
-                data = response.data
-                if data:
-                    flight_data = {
-                        'departure': data[0]['itineraries'][0]['segments'][0]['departure']['at'],
-                        'price': float(data[0]['price']['total']),
-                        'origin': origin,
-                        'destination': destination
-                    }
-                    all_data.append(flight_data)
-                    logging.info(f"Fetched data for {origin} to {destination} on {sample_date}")
-                else:
-                    logging.warning(f"No data found for {origin} to {destination} on {sample_date}")
-            except ResponseError as error:
-                st.error(f"Error fetching data from Amadeus API: {error}")
-                logging.error(f"Error fetching data from Amadeus API: {error}")
+                
+                for offer in response.data:
+                    price = float(offer['price']['total'])
+                    departure = offer['itineraries'][0]['segments'][0]['departure']['at']
+                    airline = offer['validatingAirlineCodes'][0]
+                    
+                    all_data.append({
+                        'departure': departure,
+                        'price': price,
+                        'airline': airline
+                    })
+                    
+            except ResponseError as e:
+                logging.error(f"Amadeus API error: {str(e)}")
+                continue
             except Exception as e:
-                st.error(f"An unexpected error occurred while fetching data: {str(e)}")
-                logging.error(f"Unexpected error in fetch_and_process_data: {str(e)}")
+                logging.error(f"Unexpected error in data fetching: {str(e)}")
+                continue
+            
+            processed += 1
+            progress_bar.progress(processed / total_iterations)
+            time.sleep(0.1)
 
         current_date += relativedelta(months=1)
-
+    
+    progress_bar.empty()
+    status_text.empty()
+    
     df = pd.DataFrame(all_data)
     if not df.empty:
         df['departure'] = pd.to_datetime(df['departure'])
     return df
 
-def engineer_features(df):
+def prepare_features(df):
+    """
+    Prepare features for the prediction model
+    """
+    if df.empty:
+        return None, None
+    
     df['day_of_week'] = df['departure'].dt.dayofweek
     df['month'] = df['departure'].dt.month
     df['day'] = df['departure'].dt.day
-    df['days_until_flight'] = (df['departure'] - datetime.now()).dt.days
-    df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
-    df['is_holiday'] = ((df['month'] == 12) & (df['day'].isin([24, 25, 31])) | 
-                        (df['month'] == 1) & (df['day'] == 1)).astype(int)
-    return df
-
-def train_model(df):
-    features = ['day_of_week', 'month', 'day', 'days_until_flight', 'is_weekend', 'is_holiday']
+    df['days_until_flight'] = (df['departure'] - pd.Timestamp.now()).dt.days
+    
+    label_encoder = LabelEncoder()
+    df['airline_encoded'] = label_encoder.fit_transform(df['airline'])
+    
+    features = ['day_of_week', 'month', 'day', 'days_until_flight', 'airline_encoded']
     X = df[features]
     y = df['price']
     
+    return X, y
+
+def train_model(X, y):
+    """
+    Train the prediction model
+    """
+    if X is None or y is None:
+        return None
+        
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    param_grid = {
-        'n_estimators': [100, 200],
-        'max_depth': [3, 4, 5],
-        'learning_rate': [0.01, 0.1]
-    }
-    
-    model = GridSearchCV(GradientBoostingRegressor(random_state=42), param_grid, cv=5)
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
-    
-    train_predictions = model.predict(X_train)
-    test_predictions = model.predict(X_test)
-    
-    train_mae = mean_absolute_error(y_train, train_predictions)
-    test_mae = mean_absolute_error(y_test, test_predictions)
-    
-    return model.best_estimator_, train_mae, test_mae
+    return model
 
-def predict_prices(model, start_date, end_date, origin, destination):
-    date_range = pd.date_range(start=start_date, end=end_date)
-    future_data = pd.DataFrame({'departure': date_range})
-    future_data = engineer_features(future_data)
-    future_data['origin'] = origin
-    future_data['destination'] = destination
+def generate_future_dates(start_date, days=90):
+    """
+    Generate future dates for prediction
+    """
+    future_dates = pd.date_range(start=start_date, periods=days, freq='D')
+    future_df = pd.DataFrame({'departure': future_dates})
     
-    features = ['day_of_week', 'month', 'day', 'days_until_flight', 'is_weekend', 'is_holiday']
-    future_data['predicted_price'] = model.predict(future_data[features])
+    future_df['day_of_week'] = future_df['departure'].dt.dayofweek
+    future_df['month'] = future_df['departure'].dt.month
+    future_df['day'] = future_df['departure'].dt.day
+    future_df['days_until_flight'] = (future_df['departure'] - pd.Timestamp.now()).dt.days
     
-    return future_data
+    return future_df
 
-def plot_prices(df, title):
+def create_price_trend_chart(df):
+    """
+    Create an interactive price trend chart
+    """
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df['departure'], y=df['predicted_price'], mode='lines+markers', name='Predicted Price'))
-    fig.update_layout(title=title, xaxis_title='Date', yaxis_title='Price ($)')
+    fig.add_trace(go.Scatter(
+        x=df['departure'],
+        y=df['predicted_price'],
+        mode='lines+markers',
+        name='Predicted Price',
+        line=dict(color='#1f77b4'),
+        hovertemplate='Date: %{x}<br>Price: $%{y:.2f}<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        title="Price Trend Forecast",
+        xaxis_title="Date",
+        yaxis_title="Price ($)",
+        template="plotly_white",
+        height=500,
+        hovermode='x unified'
+    )
+    
     return fig
 
-def validate_input(origin, destination, outbound_date):
-    if not origin or not destination:
-        st.error("Please enter both origin and destination airport codes.")
-        return False
-    if outbound_date <= datetime.now().date():
-        st.error("Please select a future date for your outbound flight.")
-        return False
-    return True
-
 def main():
-    st.title("✈️ Flight Price Predictor for Italy 2025")
-    st.write("Plan your trip to Italy for Tanner & Jill's wedding!")
-
-    col1, col2 = st.columns(2)
-
+    st.set_page_config(page_title="Flight Price Predictor", page_icon="✈️", layout="wide")
+    
+    st.title("✈️ Flight Price Predictor")
+    st.markdown("Predict future flight prices using historical data and machine learning")
+    
+    col1, col2, col3 = st.columns(3)
+    
     with col1:
-        origin = st.text_input("🛫 Origin Airport Code", "").upper()
-        outbound_date = st.date_input("🗓️ Outbound Flight Date", value=datetime(2025, 9, 10))
+        origin = st.text_input("Origin Airport Code", "JFK").upper()
     with col2:
-        destination = st.text_input("🛬 Destination Airport Code", "").upper()
-
+        destination = st.text_input("Destination Airport Code", "LAX").upper()
+    with col3:
+        start_date = st.date_input("Start Date", min_value=datetime.today())
+    
     if st.button("🔍 Predict Prices"):
-        if not validate_input(origin, destination, outbound_date):
+        if len(origin) != 3 or len(destination) != 3:
+            st.error("Please enter valid 3-letter airport codes")
             return
-
-        with st.spinner("Loading data and making predictions..."):
+            
+        with st.spinner("Analyzing flight patterns..."):
             try:
-                existing_data = load_data_from_gcs(origin, destination)
-
-                if not existing_data.empty:
-                    st.success(f"Using existing data for {origin} to {destination}")
-                    st.info(f"Total records: {len(existing_data)}")
-                else:
-                    st.info(f"No existing data found for {origin} to {destination}. Will fetch new data.")
-
-                if should_call_api(origin, destination):
-                    st.info("Fetching new data from API...")
-                    new_data = fetch_and_process_data(origin, destination, datetime.now().date(), outbound_date)
-                    if not new_data.empty:
-                        existing_data = pd.concat([existing_data, new_data], ignore_index=True)
-                        existing_data = existing_data.sort_values('departure').drop_duplicates(subset=['departure', 'origin', 'destination'], keep='last')
-                        save_data_to_gcs(existing_data, origin, destination)
-                        st.success(f"Data updated successfully. Total records: {len(existing_data)}")
-                    else:
-                        st.warning("Unable to fetch new data from API. Proceeding with existing data.")
-                else:
-                    st.info("API call limit reached for this route. Using existing data.")
-
-                if existing_data.empty:
-                    st.error("No data available for prediction. Please try again later or with a different route.")
+                # Fetch historical data
+                df = fetch_and_process_data(origin, destination, start_date, None)
+                
+                if df.empty:
+                    st.error("No flight data available for the selected route")
                     return
-
-                st.success(f"Analyzing {len(existing_data)} records for your route.")
-
-                with st.expander("View Sample Data"):
-                    st.dataframe(existing_data.head())
-
-                df = engineer_features(existing_data)
-                model, train_mae, test_mae = train_model(df)
-
-                logging.info(f"Model trained. Estimated price accuracy: ±${test_mae:.2f} (based on test data)")
-
-                future_prices = predict_prices(model, datetime.now().date(), outbound_date, origin, destination)
-
-                st.subheader("📈 Predicted Prices")
-                fig = plot_prices(future_prices, f"Predicted Prices ({origin} to {destination})")
+                
+                # Prepare data and train model
+                X, y = prepare_features(df)
+                model = train_model(X, y)
+                
+                if model is None:
+                    st.error("Unable to train prediction model")
+                    return
+                
+                # Generate and predict future prices
+                future_df = generate_future_dates(start_date)
+                future_df['airline_encoded'] = df['airline_encoded'].mode()[0]  # Use most common airline
+                
+                features = ['day_of_week', 'month', 'day', 'days_until_flight', 'airline_encoded']
+                future_df['predicted_price'] = model.predict(future_df[features])
+                
+                # Display visualizations
+                st.subheader("📈 Price Forecast")
+                fig = create_price_trend_chart(future_df)
                 st.plotly_chart(fig, use_container_width=True)
-
-                best_days = future_prices.nsmallest(5, 'predicted_price')
+                
                 st.subheader("💰 Best Days to Book")
-                st.table(best_days[['departure', 'predicted_price']].set_index('departure').rename(columns={'predicted_price': 'Predicted Price ($)'}))
-
-                avg_price = future_prices['predicted_price'].mean()
-                st.metric(label="💵 Average Predicted Price", value=f"${avg_price:.2f}")
-
-                price_range = future_prices['predicted_price'].max() - future_prices['predicted_price'].min()
-                st.metric(label="📊 Price Range", value=f"${price_range:.2f}")
-
-                st.info(f"Predictions shown are for flights from today until {outbound_date}.")
-
+                best_days = future_df.nsmallest(5, 'predicted_price')
+                
+                fig_best_days = go.Figure()
+                fig_best_days.add_trace(go.Bar(
+                    x=best_days['departure'].dt.strftime('%Y-%m-%d'),
+                    y=best_days['predicted_price'],
+                    text=best_days['predicted_price'].round(2),
+                    textposition='auto',
+                    marker_color='#1f77b4'
+                ))
+                
+                fig_best_days.update_layout(
+                    title="Top 5 Cheapest Days to Fly",
+                    xaxis_title="Date",
+                    yaxis_title="Price ($)",
+                    showlegend=False,
+                    height=400,
+                    template="plotly_white"
+                )
+                
+                st.plotly_chart(fig_best_days, use_container_width=True)
+                
+                # Display statistics
+                st.subheader("📊 Price Statistics")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Average Price", f"${future_df['predicted_price'].mean():.2f}")
+                with col2:
+                    st.metric("Minimum Price", f"${future_df['predicted_price'].min():.2f}")
+                with col3:
+                    st.metric("Maximum Price", f"${future_df['predicted_price'].max():.2f}")
+                
             except Exception as e:
-                st.error(f"An unexpected error occurred: {str(e)}")
-                logging.error(f"Unexpected error in main function: {str(e)}", exc_info=True)
+                logging.error(f"Error in main execution: {str(e)}")
+                st.error("An error occurred while processing your request. Please try again.")
 
 if __name__ == "__main__":
     main()

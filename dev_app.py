@@ -214,7 +214,7 @@ def train_model(X, y):
     model.fit(X_train, y_train)
     return model
 
-def generate_future_dates(start_date, days=90):
+def generate_future_dates(start_date, days=90, airline_encoder=None, default_airline_code=0):
     """
     Generate future dates for prediction
     """
@@ -231,6 +231,9 @@ def generate_future_dates(start_date, days=90):
     future_df['month'] = future_df['departure'].dt.month
     future_df['day'] = future_df['departure'].dt.day
     future_df['days_until_flight'] = (future_df['departure'] - pd.Timestamp.now()).dt.days
+    
+    # Add airline_encoded column with default value
+    future_df['airline_encoded'] = default_airline_code
     
     return future_df
 
@@ -296,9 +299,11 @@ def main():
                     st.error("Unable to train prediction model")
                     return
                 
+                # Get the most common airline code from historical data
+                default_airline_code = df['airline_encoded'].mode()[0] if 'airline_encoded' in df else 0
+                
                 # Generate and predict future prices
-                future_df = generate_future_dates(start_date)
-                future_df['airline_encoded'] = df['airline_encoded'].mode()[0]  # Use most common airline
+                future_df = generate_future_dates(start_date, days=90, default_airline_code=default_airline_code)
                 
                 features = ['day_of_week', 'month', 'day', 'days_until_flight', 'airline_encoded']
                 future_df['predicted_price'] = model.predict(future_df[features])

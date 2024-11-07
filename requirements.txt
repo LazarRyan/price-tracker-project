@@ -8,3 +8,5 @@ protobuf==5.28.3
 python_dateutil==2.9.0.post0
 scikit_learn==1.5.2
 streamlit==1.40.0
+google-cloud-storage
+google-auth

@@ -38,7 +38,7 @@ except Exception as e:
 # Initialize Google Cloud Storage using Streamlit secrets
 try:
     # Create credentials object from Streamlit secrets
-    credentials_dict = json.loads(st.secrets["GOOGLE_APPLICATION_CREDENTIALS"])
+    credentials_dict = json.loads(st.secrets["gcp_service_account"])
     credentials = service_account.Credentials.from_service_account_info(credentials_dict)
     
     storage_client = storage.Client(credentials=credentials)
@@ -58,7 +58,7 @@ def save_to_gcs(df, filename):
             return False
             
         csv_data = df.to_csv(index=False)
-        blob = bucket.blob(f'flight_data/{filename}')
+        blob = bucket.blob(filename)
         blob.upload_from_string(csv_data, content_type='text/csv')
         
         logging.info(f"Successfully saved {filename} to GCS")
@@ -76,7 +76,7 @@ def load_from_gcs(filename):
             logging.error("GCS client not initialized")
             return None
             
-        blob = bucket.blob(f'flight_data/{filename}')
+        blob = bucket.blob(filename)
         data = blob.download_as_string()
         df = pd.read_csv(pd.io.common.BytesIO(data))
         return df
@@ -88,8 +88,8 @@ def fetch_and_process_data(origin, destination, start_date, end_date):
     """
     Fetch and process flight data with error handling and GCS integration
     """
-    # Try to load existing data first
-    filename = f"{origin}_{destination}_{start_date.strftime('%Y%m%d')}.csv"
+    # Update filename format
+    filename = f"flight_prices_{origin}_{destination}.csv"
     existing_df = load_from_gcs(filename)
     
     if existing_df is not None:

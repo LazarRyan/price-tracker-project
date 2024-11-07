@@ -92,10 +92,20 @@ def fetch_and_process_data(origin, destination, start_date, end_date):
     filename = f"flight_prices_{origin}_{destination}.csv"
     existing_df = load_from_gcs(filename)
     
+    # Check if we already fetched this route today
+    today = datetime.now().date()
     if existing_df is not None:
-        return existing_df
+        last_modified = bucket.get_blob(filename).updated.date()
+        if last_modified == today:
+            st.info("Using cached data from today's previous search.")
+            return existing_df
+    
+    if existing_df is None:
+        all_data = []
+    else:
+        st.info("Found existing data. Updating with new prices...")
+        all_data = existing_df.to_dict('records')
 
-    all_data = []
     current_date = start_date
     end_date = start_date + relativedelta(months=12)
     
@@ -105,55 +115,68 @@ def fetch_and_process_data(origin, destination, start_date, end_date):
     status_text = st.empty()
     processed = 0
 
-    while current_date < end_date:
-        month_end = current_date + relativedelta(months=1, days=-1)
-        sample_dates = [current_date + timedelta(days=random.randint(0, (month_end - current_date).days)) 
-                       for _ in range(3)]
+    try:
+        while current_date < end_date:
+            month_end = current_date + relativedelta(months=1, days=-1)
+            sample_dates = [current_date + timedelta(days=random.randint(0, (month_end - current_date).days)) 
+                           for _ in range(3)]
 
-        for sample_date in sample_dates:
-            status_text.text(f"Analyzing flights for {sample_date.strftime('%Y-%m-%d')}...")
-            
-            try:
-                response = amadeus.shopping.flight_offers_search.get(
-                    originLocationCode=origin,
-                    destinationLocationCode=destination,
-                    departureDate=sample_date.strftime('%Y-%m-%d'),
-                    adults=1
-                )
+            for sample_date in sample_dates:
+                status_text.text(f"Analyzing flights for {sample_date.strftime('%Y-%m-%d')}...")
                 
-                for offer in response.data:
-                    price = float(offer['price']['total'])
-                    departure = offer['itineraries'][0]['segments'][0]['departure']['at']
-                    airline = offer['validatingAirlineCodes'][0]
+                try:
+                    response = amadeus.shopping.flight_offers_search.get(
+                        originLocationCode=origin,
+                        destinationLocationCode=destination,
+                        departureDate=sample_date.strftime('%Y-%m-%d'),
+                        adults=1
+                    )
                     
-                    all_data.append({
-                        'departure': departure,
-                        'price': price,
-                        'airline': airline
-                    })
-                    
-            except ResponseError as e:
-                logging.error(f"Amadeus API error: {str(e)}")
-                continue
-            except Exception as e:
-                logging.error(f"Unexpected error in data fetching: {str(e)}")
-                continue
-            
-            processed += 1
-            progress_bar.progress(processed / total_iterations)
-            time.sleep(0.1)
+                    for offer in response.data:
+                        price = float(offer['price']['total'])
+                        departure = offer['itineraries'][0]['segments'][0]['departure']['at']
+                        airline = offer['validatingAirlineCodes'][0]
+                        
+                        all_data.append({
+                            'departure': departure,
+                            'price': price,
+                            'airline': airline
+                        })
+                        
+                except ResponseError as e:
+                    logging.error(f"Amadeus API error: {str(e)}")
+                    if "quota" in str(e).lower():
+                        st.warning("API quota reached. Using existing data.")
+                        if existing_df is not None:
+                            return existing_df
+                        raise e
+                    continue
+                except Exception as e:
+                    logging.error(f"Unexpected error in data fetching: {str(e)}")
+                    continue
+                
+                processed += 1
+                progress_bar.progress(processed / total_iterations)
+                time.sleep(0.1)
 
-        current_date += relativedelta(months=1)
-    
-    progress_bar.empty()
-    status_text.empty()
-    
-    df = pd.DataFrame(all_data)
-    if not df.empty:
-        df['departure'] = pd.to_datetime(df['departure'])
-        # Save to GCS
-        save_to_gcs(df, filename)
-    return df
+            current_date += relativedelta(months=1)
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        df = pd.DataFrame(all_data)
+        if not df.empty:
+            df['departure'] = pd.to_datetime(df['departure'])
+            # Save to GCS
+            save_to_gcs(df, filename)
+        return df
+
+    except Exception as e:
+        logging.error(f"Error in fetch_and_process_data: {str(e)}")
+        if existing_df is not None:
+            st.warning("Error occurred. Using existing data from storage.")
+            return existing_df
+        raise e
 
 def prepare_features(df):
     """

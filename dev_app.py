@@ -28,8 +28,8 @@ logging.basicConfig(
 # Initialize Amadeus client using Streamlit secrets
 try:
     amadeus = Client(
-        client_id=st.secrets["AMADEUS_API_KEY"],
-        client_secret=st.secrets["AMADEUS_API_SECRET"]
+        client_id=st.secrets["AMADEUS_CLIENT_ID"],
+        client_secret=st.secrets["AMADEUS_CLIENT_SECRET"]
     )
 except Exception as e:
     logging.error(f"Failed to initialize Amadeus client: {str(e)}")

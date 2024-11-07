@@ -21,28 +21,28 @@ warnings.filterwarnings('ignore')
 
 # Configure logging
 logging.basicConfig(
-    filename='flight_prediction.log',
     level=logging.ERROR,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Initialize Amadeus client
+# Initialize Amadeus client using Streamlit secrets
 try:
     amadeus = Client(
-        client_id='AMADEUS_API_KEY',
-        client_secret='AMADEUS_API_SECRET'
+        client_id=st.secrets["AMADEUS_API_KEY"],
+        client_secret=st.secrets["AMADEUS_API_SECRET"]
     )
 except Exception as e:
     logging.error(f"Failed to initialize Amadeus client: {str(e)}")
     amadeus = None
 
-# Initialize Google Cloud Storage
+# Initialize Google Cloud Storage using Streamlit secrets
 try:
-    credentials = service_account.Credentials.from_service_account_file(
-        'path/to/your/service-account-key.json'
-    )
+    # Create credentials object from Streamlit secrets
+    credentials_dict = json.loads(st.secrets["GOOGLE_APPLICATION_CREDENTIALS"])
+    credentials = service_account.Credentials.from_service_account_info(credentials_dict)
+    
     storage_client = storage.Client(credentials=credentials)
-    bucket_name = 'gcs_bucket_name'
+    bucket_name = st.secrets["GCS_BUCKET_NAME"]
     bucket = storage_client.bucket(bucket_name)
 except Exception as e:
     logging.error(f"Failed to initialize GCS client: {str(e)}")

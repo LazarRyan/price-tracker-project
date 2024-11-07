@@ -28,8 +28,8 @@ logging.basicConfig(
 # Initialize Amadeus client using Streamlit secrets
 try:
     amadeus = Client(
-        client_id=st.secrets["AMADEUS_CLIENT_ID"],
-        client_secret=st.secrets["AMADEUS_CLIENT_SECRET"]
+        client_id=st.secrets["AMADEUS_API_KEY"],
+        client_secret=st.secrets["AMADEUS_API_SECRET"]
     )
 except Exception as e:
     logging.error(f"Failed to initialize Amadeus client: {str(e)}")
@@ -37,12 +37,12 @@ except Exception as e:
 
 # Initialize Google Cloud Storage using Streamlit secrets
 try:
-    # Create credentials object from Streamlit secrets
-    credentials_dict = json.loads(st.secrets["gcp_service_account"])
+    # Convert Streamlit's AttrDict to regular dict
+    credentials_dict = dict(st.secrets["gcp_service_account"])
     credentials = service_account.Credentials.from_service_account_info(credentials_dict)
     
     storage_client = storage.Client(credentials=credentials)
-    bucket_name = st.secrets["GCS_BUCKET_NAME"]
+    bucket_name = st.secrets["gcs_bucket_name"]
     bucket = storage_client.bucket(bucket_name)
 except Exception as e:
     logging.error(f"Failed to initialize GCS client: {str(e)}")

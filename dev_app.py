@@ -12,6 +12,10 @@ from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import LabelEncoder
+from google.cloud import storage
+from google.oauth2 import service_account
+import json
+import os
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -25,17 +29,72 @@ logging.basicConfig(
 # Initialize Amadeus client
 try:
     amadeus = Client(
-        client_id='YOUR_API_KEY',
-        client_secret='YOUR_API_SECRET'
+        client_id='AMADEUS_API_KEY',
+        client_secret='AMADEUS_API_SECRET'
     )
 except Exception as e:
     logging.error(f"Failed to initialize Amadeus client: {str(e)}")
     amadeus = None
 
+# Initialize Google Cloud Storage
+try:
+    credentials = service_account.Credentials.from_service_account_file(
+        'path/to/your/service-account-key.json'
+    )
+    storage_client = storage.Client(credentials=credentials)
+    bucket_name = 'gcs_bucket_name'
+    bucket = storage_client.bucket(bucket_name)
+except Exception as e:
+    logging.error(f"Failed to initialize GCS client: {str(e)}")
+    storage_client = None
+
+def save_to_gcs(df, filename):
+    """
+    Save DataFrame to Google Cloud Storage
+    """
+    try:
+        if storage_client is None:
+            logging.error("GCS client not initialized")
+            return False
+            
+        csv_data = df.to_csv(index=False)
+        blob = bucket.blob(f'flight_data/{filename}')
+        blob.upload_from_string(csv_data, content_type='text/csv')
+        
+        logging.info(f"Successfully saved {filename} to GCS")
+        return True
+    except Exception as e:
+        logging.error(f"Error saving to GCS: {str(e)}")
+        return False
+
+def load_from_gcs(filename):
+    """
+    Load DataFrame from Google Cloud Storage
+    """
+    try:
+        if storage_client is None:
+            logging.error("GCS client not initialized")
+            return None
+            
+        blob = bucket.blob(f'flight_data/{filename}')
+        data = blob.download_as_string()
+        df = pd.read_csv(pd.io.common.BytesIO(data))
+        return df
+    except Exception as e:
+        logging.error(f"Error loading from GCS: {str(e)}")
+        return None
+
 def fetch_and_process_data(origin, destination, start_date, end_date):
     """
-    Fetch and process flight data with error handling and progress indication
+    Fetch and process flight data with error handling and GCS integration
     """
+    # Try to load existing data first
+    filename = f"{origin}_{destination}_{start_date.strftime('%Y%m%d')}.csv"
+    existing_df = load_from_gcs(filename)
+    
+    if existing_df is not None:
+        return existing_df
+
     all_data = []
     current_date = start_date
     end_date = start_date + relativedelta(months=12)
@@ -92,6 +151,8 @@ def fetch_and_process_data(origin, destination, start_date, end_date):
     df = pd.DataFrame(all_data)
     if not df.empty:
         df['departure'] = pd.to_datetime(df['departure'])
+        # Save to GCS
+        save_to_gcs(df, filename)
     return df
 
 def prepare_features(df):
@@ -222,7 +283,7 @@ def main():
                 fig_best_days.add_trace(go.Bar(
                     x=best_days['departure'].dt.strftime('%Y-%m-%d'),
                     y=best_days['predicted_price'],
-                    text=best_days['predicted_price'].round(2),
+                    text=['${:,.2f}'.format(x) for x in best_days['predicted_price']],
                     textposition='auto',
                     marker_color='#1f77b4'
                 ))

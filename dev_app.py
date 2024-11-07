@@ -185,6 +185,9 @@ def prepare_features(df):
     if df.empty:
         return None, None
     
+    # Ensure departure is datetime
+    df['departure'] = pd.to_datetime(df['departure'])
+    
     df['day_of_week'] = df['departure'].dt.dayofweek
     df['month'] = df['departure'].dt.month
     df['day'] = df['departure'].dt.day
@@ -215,6 +218,12 @@ def generate_future_dates(start_date, days=90):
     """
     Generate future dates for prediction
     """
+    # Ensure start_date is datetime
+    if isinstance(start_date, str):
+        start_date = pd.to_datetime(start_date)
+    elif isinstance(start_date, datetime.date):
+        start_date = pd.to_datetime(start_date)
+    
     future_dates = pd.date_range(start=start_date, periods=days, freq='D')
     future_df = pd.DataFrame({'departure': future_dates})
     
